@@ -4,6 +4,8 @@ import path from 'path';
 import { program } from 'commander';
 import filenamify from "filenamify";
 import lodash from 'lodash';
+import * as mustache from 'mustache';
+import { readFileSync } from 'fs';
 
 
 
@@ -51,6 +53,8 @@ interface File {
   filename: string,
   url: string, // link to download actual bytes of files
   modified_at: string, // timestamp
+  locked_for_user: boolean,
+  lock_explanation: string
 }
 
 interface Folder {
@@ -92,7 +96,8 @@ interface ModuleItem  {
     module_id: number,
     html_url: string,
     content_id: number,
-    url: string;
+    url: string,
+    external_url: string;
   }
 
 
@@ -137,10 +142,18 @@ async function downloadFiles(c: Course, courseDir: string) {
   const uniqueFiles = lodash.uniqBy(sortedFiles, f => `${f.folder_id} ${f.filename}`);
 
   for (const file of uniqueFiles) {
+
+    // Some files are locked and not available for download, which causes the script to silently fail
+    if (file.locked_for_user) {
+      console.info(`[INFO] File \'${file.filename}\' skipped. Reason: ${file.lock_explanation}`);
+      continue;
+    }
+
     const canvasFoldername = folders.find(f => f.id === file.folder_id).full_name;
     const santizedCanvasFoldername = path.resolve(courseDir, ...canvasFoldername.split('/').map(n => santizeFilename(n)));
     const folder = path.resolve(courseDir, santizedCanvasFoldername);
     await fs.mkdirs(folder)
+    
     const destPath = path.resolve(folder, file.filename);
 
     await fIfNeeded(
@@ -167,6 +180,7 @@ async function downloadModules(c: Course, courseDir: string) {
     const folder = path.resolve(courseDir, santizedCanvasFoldername);
     await fs.mkdirs(folder)
 
+    let external_urls: ModuleItem[] = [];
     const items = await getJson(module.items_url) as ModuleItem[];
     for (let item of items){
 
@@ -174,11 +188,17 @@ async function downloadModules(c: Course, courseDir: string) {
 
       // this can be any of a number of different interfaces.
       // it might contain a download link for a file which is not available under the /files api
+
+      // Export external links to a text file
+      if (item.external_url != undefined)
+        external_urls.push(item);
+
+      if (item.url == undefined) continue;
+
       const thing = await getJson(item.url)
 
       if (!thing.url||!thing.filename) continue;
       const destPath = path.resolve(folder, thing.filename);
-
 
       await fIfNeeded(
         ()=>new Promise((resolve, reject) => {
@@ -192,6 +212,24 @@ async function downloadModules(c: Course, courseDir: string) {
         destPath,
         new Date(thing.modified_at)
       )
+    }
+
+    // Write a markdown file with all the extenal URLs
+    if (external_urls.length > 0) {
+      const template = `
+        # ${module.name} 
+
+        {{#.}}
+        - [{{{title}}}]({{{external_url}}})
+        {{/.}}
+      `
+
+      const md = mustache.render(template, external_urls);
+      const destPath = path.resolve(folder, 'External_urls.md');
+
+      fs.writeFileSync(destPath, md);
+      console.info(`[WRITE] ${destPath}`);
+      
     }
   }
 }
